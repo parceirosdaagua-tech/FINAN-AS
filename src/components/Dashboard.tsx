@@ -313,150 +313,237 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
 
   // --- Add Line Helpers (CRUD Inline Core) ---
   const handleAddReceita = async () => {
+    const tempId = "temp-rec-" + Date.now();
+    const newRec: Receita = {
+      id: tempId,
+      descricao: "Nova Receita",
+      placa_modelo: "",
+      valor: 0,
+      data: new Date().toISOString().split("T")[0],
+      status_recebimento: "pendente",
+      recorrente: false
+    };
+    
+    setReceitas(prev => [...prev, newRec]);
     setAddingReceita(true);
     try {
       const res = await fetch("/api/receitas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          descricao: "Nova Receita",
-          valor: 0,
-          data: new Date().toISOString().split("T")[0],
-          status_recebimento: "pendente"
+          descricao: newRec.descricao,
+          valor: newRec.valor,
+          data: newRec.data,
+          status_recebimento: newRec.status_recebimento
         })
       });
-      const newRec = await res.json();
-      setReceitas(prev => [...prev, newRec]);
+      if (res.ok) {
+        const savedRec = await res.json();
+        setReceitas(prev => prev.map(r => r.id === tempId ? savedRec : r));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar receita, mantendo localmente:", err);
+      setReceitas(prev => prev.map(r => r.id === tempId ? { ...r, id: "rec-" + Date.now() } : r));
     } finally {
       setAddingReceita(false);
     }
   };
 
   const handleAddDespesa = async (tipo: 'geral' | 'adicional' = 'geral') => {
+    const tempId = "temp-des-" + Date.now();
+    const newDes: Despesa = {
+      id: tempId,
+      descricao: tipo === "adicional" ? "Gasto Adicional" : "Nova Despesa",
+      valor: 0,
+      data_vencimento: new Date().toISOString().split("T")[0],
+      status_pagamento: "pendente",
+      tipo,
+      recorrente: false
+    };
+
+    setDespesas(prev => [...prev, newDes]);
+    setOriginalDespesas(prev => [...prev, JSON.parse(JSON.stringify(newDes))]);
     setAddingDespesa(true);
     try {
       const res = await fetch("/api/despesas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          descricao: tipo === "adicional" ? "Gasto Adicional" : "Nova Despesa",
-          valor: 0,
-          data_vencimento: new Date().toISOString().split("T")[0],
-          status_pagamento: "pendente",
+          descricao: newDes.descricao,
+          valor: newDes.valor,
+          data_vencimento: newDes.data_vencimento,
+          status_pagamento: newDes.status_pagamento,
           tipo
         })
       });
-      const newDes = await res.json();
-      setDespesas(prev => [...prev, newDes]);
-      setOriginalDespesas(prev => [...prev, JSON.parse(JSON.stringify(newDes))]);
+      if (res.ok) {
+        const savedDes = await res.json();
+        setDespesas(prev => prev.map(d => d.id === tempId ? savedDes : d));
+        setOriginalDespesas(prev => prev.map(d => d.id === tempId ? JSON.parse(JSON.stringify(savedDes)) : d));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar despesa, mantendo localmente:", err);
+      setDespesas(prev => prev.map(d => d.id === tempId ? { ...d, id: "des-" + Date.now() } : d));
+      setOriginalDespesas(prev => prev.map(d => d.id === tempId ? { ...d, id: "des-" + Date.now() } : d));
     } finally {
       setAddingDespesa(false);
     }
   };
 
   const handleAddFatura = async () => {
+    const tempId = "temp-fat-" + Date.now();
+    const newFat: FaturaCartao = {
+      id: tempId,
+      nome_cartao: "Novo Cartão",
+      finais_cartao: "0000",
+      limite_total: 5000,
+      gastos_totais: 0,
+      limite_atual: 5000,
+      melhor_dia_compra: 10,
+      valor_total: 0,
+      data_vencimento: new Date().toISOString().split("T")[0],
+      status_pagamento: "pendente"
+    };
+
+    setFaturas(prev => [...prev, newFat]);
     setAddingFatura(true);
     try {
       const res = await fetch("/api/faturas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          nome_cartao: "Novo Cartão",
-          finais_cartao: "0000",
-          limite_total: 5000,
-          gastos_totais: 0,
-          limite_atual: 5000,
-          melhor_dia_compra: 10,
-          valor_total: 0,
-          data_vencimento: new Date().toISOString().split("T")[0],
-          status_pagamento: "pendente"
-        })
+        body: JSON.stringify(newFat)
       });
-      const newFat = await res.json();
-      setFaturas(prev => [...prev, newFat]);
+      if (res.ok) {
+        const savedFat = await res.json();
+        setFaturas(prev => prev.map(f => f.id === tempId ? savedFat : f));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar fatura, mantendo localmente:", err);
+      setFaturas(prev => prev.map(f => f.id === tempId ? { ...f, id: "fat-" + Date.now() } : f));
     } finally {
       setAddingFatura(false);
     }
   };
 
   const handleAddPagamentoDiario = async () => {
+    const tempId = "temp-pag-" + Date.now();
+    const newPag: PagamentoDiario = {
+      id: tempId,
+      descricao: "Prestação Carro",
+      parcela_atual: 62,
+      parcela_total: 520,
+      valor_parcela: 100,
+      valor_pago: 6200,
+      valor_saldo: 45800,
+      segunda_a_sexta: true,
+      data: new Date().toISOString().split("T")[0],
+      status: "pendente",
+      valor_pago_mes: 0
+    };
+
+    setPagamentosDiarios(prev => [...prev, newPag]);
     setAddingPagamento(true);
     try {
       const res = await fetch("/api/pagamentos-diarios", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          descricao: "Prestação Carro",
-          parcela_atual: 62,
-          parcela_total: 520,
-          valor_parcela: 100,
-          valor_pago: 6200,
-          valor_saldo: 45800,
-          segunda_a_sexta: true,
-          data: new Date().toISOString().split("T")[0],
-          status: "pendente",
-          valor_pago_mes: 0
-        })
+        body: JSON.stringify(newPag)
       });
-      const newPag = await res.json();
-      setPagamentosDiarios(prev => [...prev, newPag]);
+      if (res.ok) {
+        const savedPag = await res.json();
+        setPagamentosDiarios(prev => prev.map(p => p.id === tempId ? savedPag : p));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar pagamento diário, mantendo localmente:", err);
+      setPagamentosDiarios(prev => prev.map(p => p.id === tempId ? { ...p, id: "pag-" + Date.now() } : p));
     } finally {
       setAddingPagamento(false);
     }
   };
 
   const handleAddDividaOutros = async () => {
+    const tempId = "temp-div-" + Date.now();
+    const newDiv: DividaOutros = {
+      id: tempId,
+      devedor: "Novo Devedor",
+      tipo: "divida",
+      valor_total: 0,
+      valor_pago: 0,
+      saldo_devedor: 0,
+      data_vencimento: new Date().toISOString().split("T")[0],
+      status: "pendente",
+      recorrente: false
+    };
+
+    setDividasOutros(prev => [...prev, newDiv]);
     setAddingDivida(true);
     try {
       const res = await fetch("/api/dividas-outros", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          devedor: "Novo Devedor",
-          tipo: "divida",
-          valor_total: 0,
-          valor_pago: 0,
-          data_vencimento: new Date().toISOString().split("T")[0],
-          status: "pendente"
+          devedor: newDiv.devedor,
+          tipo: newDiv.tipo,
+          valor_total: newDiv.valor_total,
+          valor_pago: newDiv.valor_pago,
+          data_vencimento: newDiv.data_vencimento,
+          status: newDiv.status
         })
       });
-      const newDiv = await res.json();
-      setDividasOutros(prev => [...prev, newDiv]);
+      if (res.ok) {
+        const savedDiv = await res.json();
+        setDividasOutros(prev => prev.map(d => d.id === tempId ? savedDiv : d));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar dívida, mantendo localmente:", err);
+      setDividasOutros(prev => prev.map(d => d.id === tempId ? { ...d, id: "div-" + Date.now() } : d));
     } finally {
       setAddingDivida(false);
     }
   };
 
   const handleAddPrestacao = async () => {
+    const tempId = "temp-pres-" + Date.now();
+    const newPres: Prestacao = {
+      id: tempId,
+      descricao: "Nova Prestação",
+      valor_parcela: 0,
+      parcelas_pagas: 0,
+      parcelas_totais: 12,
+      data_vencimento: new Date().toISOString().split("T")[0],
+      status: "pendente"
+    };
+
+    setPrestacoes(prev => [...prev, newPres]);
+    setOriginalPrestacoes(prev => [...prev, JSON.parse(JSON.stringify(newPres))]);
     setAddingPrestacao(true);
     try {
       const res = await fetch("/api/prestacoes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          descricao: "Nova Prestação",
-          valor_parcela: 0,
-          parcelas_pagas: 0,
-          parcelas_totais: 12,
-          data_vencimento: new Date().toISOString().split("T")[0],
-          status: "pendente"
-        })
+        body: JSON.stringify(newPres)
       });
-      const newPres = await res.json();
-      setPrestacoes(prev => [...prev, newPres]);
-      setOriginalPrestacoes(prev => [...prev, JSON.parse(JSON.stringify(newPres))]);
+      if (res.ok) {
+        const savedPres = await res.json();
+        setPrestacoes(prev => prev.map(p => p.id === tempId ? savedPres : p));
+        setOriginalPrestacoes(prev => prev.map(p => p.id === tempId ? JSON.parse(JSON.stringify(savedPres)) : p));
+      } else {
+        throw new Error("Erro de resposta do servidor");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao adicionar prestação, mantendo localmente:", err);
+      setPrestacoes(prev => prev.map(p => p.id === tempId ? { ...p, id: "pres-" + Date.now() } : p));
+      setOriginalPrestacoes(prev => prev.map(p => p.id === tempId ? { ...p, id: "pres-" + Date.now() } : p));
     } finally {
       setAddingPrestacao(false);
     }
