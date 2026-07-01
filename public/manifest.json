@@ -1,0 +1,17 @@
+{
+  "short_name": "Finanças",
+  "name": "Gestão Financeira Pessoal",
+  "description": "Aplicativo de Gestão Financeira Pessoal e Familiar - Staff Edition",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "display": "standalone",
+  "orientation": "portrait"
+}

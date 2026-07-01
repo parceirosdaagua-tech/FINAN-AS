@@ -1,0 +1,12 @@
+{
+  "receitas": [],
+  "despesas": [],
+  "faturas": [],
+  "subscriptions": [],
+  "vapidKeys": {
+    "publicKey": "BPu08A_o7blzqW7nj1UGe0nu9I3wiI06sZbZTLzZcH9nO_HH6_PHrp8e4y6VLMBruHWArhO23MSZEvnNR1VdsrE",
+    "privateKey": "y_BN5-85iP-Ml3Ol7G0PmKmkr8QxE9USNd7KiR8JXrA"
+  },
+  "authPin": "123456",
+  "passkeys": []
+}

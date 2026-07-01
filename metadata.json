@@ -1,0 +1,6 @@
+{
+  "name": "Gestão Financeira Pessoal",
+  "description": "Aplicativo móvel de gestão financeira pessoal e familiar com controle de receitas, despesas, faturas e notificações push.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
