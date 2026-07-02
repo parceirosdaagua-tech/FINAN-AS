@@ -18,13 +18,21 @@ import {
   HandCoins,
   Save,
   Undo,
-  Repeat
+  Repeat,
+  DollarSign,
+  Home,
+  GlassWater,
+  Users,
+  MoreHorizontal,
+  Check,
+  Database,
+  Copy
 } from "lucide-react";
 import { Receita, Despesa, FaturaCartao, AlertNotification, PagamentoDiario, DividaOutros, Prestacao } from "../types";
 import NotificationManager from "./NotificationManager";
 
 interface DashboardProps {
-  activeView?: "painel" | "entradas" | "saidas" | "cartoes" | "dividas" | "pagamentos";
+  activeView?: "painel" | "entradas" | "saidas";
 }
 
 export default function Dashboard({ activeView = "painel" }: DashboardProps) {
@@ -54,20 +62,36 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [payQuantities, setPayQuantities] = useState<Record<string, number>>({});
 
+  // Sub-tabs for Entradas and Saídas
+  const [subTabEntradas, setSubTabEntradas] = useState<"salario" | "carros" | "alugueis" | "bar_agua" | "devedores" | "outros">("salario");
+  const [subTabSaidas, setSubTabSaidas] = useState<"alugueis" | "cartoes" | "dividas" | "outros">("alugueis");
+
   // Active Category filter
   const [activeTab, setActiveTab] = useState<"all" | "receitas" | "despesas" | "faturas">("all");
   
+  // Database connection status state
+  const [dbStatus, setDbStatus] = useState<{
+    supabaseConnected: boolean;
+    tableExists: boolean;
+    syncError: string | null;
+    mode: "supabase" | "supabase_missing_table" | "local_file";
+  } | null>(null);
+
+  const [showDbGuide, setShowDbGuide] = useState(false);
+  const [sqlCopied, setSqlCopied] = useState(false);
+
   // Fetch initial data
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [resRec, resDes, resFat, resPag, resDiv, resPres] = await Promise.all([
+      const [resRec, resDes, resFat, resPag, resDiv, resPres, resDbStatus] = await Promise.all([
         fetch("/api/receitas"),
         fetch("/api/despesas"),
         fetch("/api/faturas"),
         fetch("/api/pagamentos-diarios"),
         fetch("/api/dividas-outros"),
-        fetch("/api/prestacoes")
+        fetch("/api/prestacoes"),
+        fetch("/api/database-status").catch(() => null)
       ]);
       
       const recData = await resRec.json();
@@ -85,6 +109,12 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
       setDividasOutros(divData);
       setPrestacoes(presData);
       setOriginalPrestacoes(JSON.parse(JSON.stringify(presData)));
+
+      if (resDbStatus && resDbStatus.ok) {
+        const dbStatusData = await resDbStatus.json();
+        setDbStatus(dbStatusData);
+      }
+      
       setError(null);
     } catch (err) {
       console.error("Erro ao carregar dados do banco:", err);
@@ -110,6 +140,78 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
       });
     } catch (err) {
       console.error("Erro ao atualizar receita:", err);
+    }
+  };
+
+  const getNextMonthDate = (dateStr: string): string => {
+    if (!dateStr) return new Date().toISOString().split("T")[0];
+    const [year, month, day] = dateStr.split("-").map(Number);
+    let targetMonth = month + 1;
+    let targetYear = year;
+    if (targetMonth > 12) {
+      targetMonth = 1;
+      targetYear += 1;
+    }
+    
+    const lastDayOfTargetMonth = new Date(targetYear, targetMonth, 0).getDate();
+    const targetDay = Math.min(day, lastDayOfTargetMonth);
+    
+    const y = targetYear;
+    const m = String(targetMonth).padStart(2, '0');
+    const d = String(targetDay).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  const handleMarkAsPaidAndRollover = async (rec: Receita) => {
+    const nextMonthDate = getNextMonthDate(rec.data);
+    const tempStaticId = "temp-paid-" + Date.now();
+    
+    const staticPaidRec: Receita = {
+      id: tempStaticId,
+      descricao: rec.descricao,
+      placa_modelo: rec.placa_modelo,
+      valor: rec.valor,
+      data: rec.data, // original date so it counts in the current month statistics
+      status_recebimento: "recebido",
+      recorrente: false,
+      categoria: rec.categoria
+    };
+
+    setReceitas(prev => [
+      ...prev.map(r => r.id === rec.id ? { ...r, data: nextMonthDate, status_recebimento: "pendente" } as Receita : r),
+      staticPaidRec
+    ]);
+
+    try {
+      await fetch(`/api/receitas/${rec.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: nextMonthDate,
+          status_recebimento: "pendente"
+        })
+      });
+
+      const res = await fetch("/api/receitas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          descricao: staticPaidRec.descricao,
+          placa_modelo: staticPaidRec.placa_modelo,
+          valor: staticPaidRec.valor,
+          data: staticPaidRec.data,
+          status_recebimento: staticPaidRec.status_recebimento,
+          categoria: staticPaidRec.categoria,
+          recorrente: false
+        })
+      });
+
+      if (res.ok) {
+        const savedPaidRec = await res.json();
+        setReceitas(prev => prev.map(r => r.id === tempStaticId ? savedPaidRec : r));
+      }
+    } catch (err) {
+      console.error("Erro ao registrar pagamento e avançar data:", err);
     }
   };
 
@@ -177,11 +279,12 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
   };
 
   const savePagamentoDiario = async (id: string, updatedFields: Partial<PagamentoDiario>) => {
-    // Optimistic UI Update with calculation rules
+    let finalMergedItem: PagamentoDiario | null = null;
+
     setPagamentosDiarios(prev => prev.map(p => {
       if (p.id === id) {
         const merged = { ...p, ...updatedFields } as PagamentoDiario;
-        const valPar = merged.valor_parcela !== undefined ? merged.valor_parcela : (merged.valor_parcela || 100);
+        const valPar = merged.valor_parcela !== undefined && merged.valor_parcela !== null ? merged.valor_parcela : 100;
         merged.valor_parcela = valPar;
 
         if (
@@ -203,60 +306,92 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           merged.status = "pendente";
         }
 
+        finalMergedItem = merged;
         return merged;
       }
       return p;
     }));
 
     try {
-      const prevItem = pagamentosDiarios.find(p => p.id === id);
-      if (prevItem) {
-        const merged = { ...prevItem, ...updatedFields } as PagamentoDiario;
-        const valPar = merged.valor_parcela !== undefined ? merged.valor_parcela : (merged.valor_parcela || 100);
-        merged.valor_parcela = valPar;
-
-        if (
-          updatedFields.parcela_atual !== undefined ||
-          updatedFields.parcela_total !== undefined ||
-          updatedFields.valor_parcela !== undefined
-        ) {
-          merged.valor_pago = merged.parcela_atual * valPar;
-          merged.valor_saldo = Math.max(0, (merged.parcela_total - merged.parcela_atual) * valPar);
-        } else if (updatedFields.valor_pago !== undefined) {
-          merged.valor_saldo = Math.max(0, (merged.parcela_total * valPar) - merged.valor_pago);
-        } else if (updatedFields.valor_saldo !== undefined) {
-          merged.valor_pago = Math.max(0, (merged.parcela_total * valPar) - merged.valor_saldo);
+      // Small tick to ensure setPagamentosDiarios mapping completes and finalMergedItem is defined
+      setTimeout(async () => {
+        if (finalMergedItem) {
+          await fetch(`/api/pagamentos-diarios/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(finalMergedItem)
+          });
         }
-
-        if (merged.parcela_atual >= merged.parcela_total) {
-          merged.status = "recebido";
-        } else {
-          merged.status = "pendente";
-        }
-
-        await fetch(`/api/pagamentos-diarios/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(merged)
-        });
-      }
+      }, 0);
     } catch (err) {
       console.error("Erro ao atualizar pagamento diário:", err);
     }
   };
 
   const saveDividaOutros = async (id: string, updatedFields: Partial<DividaOutros>) => {
-    // Optimistic UI Update
-    setDividasOutros(prev => prev.map(d => d.id === id ? { ...d, ...updatedFields } as DividaOutros : d));
+    let finalMergedItem: DividaOutros | null = null;
+
+    setDividasOutros(prev => prev.map(d => {
+      if (d.id === id) {
+        const merged = { ...d, ...updatedFields } as DividaOutros;
+        
+        const parTotal = merged.parcela_total !== undefined && merged.parcela_total !== null ? merged.parcela_total : 12;
+        const parAtual = merged.parcela_atual !== undefined && merged.parcela_atual !== null ? merged.parcela_atual : 0;
+        const valPar = merged.valor_parcela !== undefined && merged.valor_parcela !== null ? merged.valor_parcela : (merged.valor_total || 0);
+
+        merged.parcela_total = parTotal;
+        merged.parcela_atual = parAtual;
+        merged.valor_parcela = valPar;
+
+        merged.valor_total = parTotal * valPar;
+        merged.valor_pago = parAtual * valPar;
+        merged.saldo_devedor = Math.max(0, (parTotal - parAtual) * valPar);
+
+        if (parAtual >= parTotal) {
+          merged.status = "pago";
+        } else {
+          merged.status = "pendente";
+        }
+
+        finalMergedItem = merged;
+        return merged;
+      }
+      return d;
+    }));
+
     try {
-      await fetch(`/api/dividas-outros/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updatedFields)
-      });
+      setTimeout(async () => {
+        if (finalMergedItem) {
+          await fetch(`/api/dividas-outros/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(finalMergedItem)
+          });
+        }
+      }, 0);
     } catch (err) {
       console.error("Erro ao atualizar dívida:", err);
     }
+  };
+
+  const handlePayDividaAndRollover = async (div: DividaOutros) => {
+    const nextMonthDate = getNextMonthDate(div.data_vencimento);
+    const parTotal = div.parcela_total !== undefined && div.parcela_total !== null ? div.parcela_total : 12;
+    const parAtual = div.parcela_atual !== undefined && div.parcela_atual !== null ? div.parcela_atual : 0;
+    const valPar = div.valor_parcela !== undefined && div.valor_parcela !== null ? div.valor_parcela : (div.valor_total || 0);
+
+    const nextParcelaAtual = Math.min(parTotal, parAtual + 1);
+    const addedValue = nextParcelaAtual > parAtual ? valPar : 0;
+    const currentPagoMes = div.valor_pago_mes || 0;
+
+    const updatedFields: Partial<DividaOutros> = {
+      parcela_atual: nextParcelaAtual,
+      valor_pago_mes: currentPagoMes + addedValue,
+      data_vencimento: nextMonthDate,
+      status: nextParcelaAtual >= parTotal ? "pago" : "pendente"
+    };
+
+    await saveDividaOutros(div.id, updatedFields);
   };
 
   const updatePrestacaoLocally = (id: string, updatedFields: Partial<Prestacao>) => {
@@ -312,16 +447,24 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
   };
 
   // --- Add Line Helpers (CRUD Inline Core) ---
-  const handleAddReceita = async () => {
+  const handleAddReceita = async (categoria: string = "outros") => {
     const tempId = "temp-rec-" + Date.now();
+    let defaultDesc = "Nova Receita";
+    if (categoria === "salario") defaultDesc = "Novo Salário";
+    if (categoria === "carros") defaultDesc = "Ganhos Veículo / Frota";
+    if (categoria === "bar_agua") defaultDesc = "Ganhos Bar & Água";
+    if (categoria === "alugueis") defaultDesc = "Novo Aluguel Recebido";
+    if (categoria === "outros") defaultDesc = "Outros Recebimentos";
+
     const newRec: Receita = {
       id: tempId,
-      descricao: "Nova Receita",
+      descricao: defaultDesc,
       placa_modelo: "",
       valor: 0,
       data: new Date().toISOString().split("T")[0],
       status_recebimento: "pendente",
-      recorrente: false
+      recorrente: false,
+      categoria: categoria
     };
     
     setReceitas(prev => [...prev, newRec]);
@@ -334,7 +477,8 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           descricao: newRec.descricao,
           valor: newRec.valor,
           data: newRec.data,
-          status_recebimento: newRec.status_recebimento
+          status_recebimento: newRec.status_recebimento,
+          categoria: categoria
         })
       });
       if (res.ok) {
@@ -351,16 +495,21 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
     }
   };
 
-  const handleAddDespesa = async (tipo: 'geral' | 'adicional' = 'geral') => {
+  const handleAddDespesa = async (categoria: string = "outros") => {
     const tempId = "temp-des-" + Date.now();
+    let defaultDesc = "Nova Despesa";
+    if (categoria === "alugueis") defaultDesc = "Aluguel Pago";
+    if (categoria === "outros") defaultDesc = "Nova Despesa Outros";
+
     const newDes: Despesa = {
       id: tempId,
-      descricao: tipo === "adicional" ? "Gasto Adicional" : "Nova Despesa",
+      descricao: defaultDesc,
       valor: 0,
       data_vencimento: new Date().toISOString().split("T")[0],
       status_pagamento: "pendente",
-      tipo,
-      recorrente: false
+      tipo: "geral",
+      recorrente: false,
+      categoria: categoria
     };
 
     setDespesas(prev => [...prev, newDes]);
@@ -375,7 +524,8 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           valor: newDes.valor,
           data_vencimento: newDes.data_vencimento,
           status_pagamento: newDes.status_pagamento,
-          tipo
+          tipo: "geral",
+          categoria: categoria
         })
       });
       if (res.ok) {
@@ -435,13 +585,14 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
     const tempId = "temp-pag-" + Date.now();
     const newPag: PagamentoDiario = {
       id: tempId,
-      descricao: "Prestação Carro",
-      parcela_atual: 62,
-      parcela_total: 520,
-      valor_parcela: 100,
-      valor_pago: 6200,
-      valor_saldo: 45800,
-      segunda_a_sexta: true,
+      descricao: "Novo Motorista",
+      veiculo: "Modelo / Placa",
+      parcela_atual: 0,
+      parcela_total: 12,
+      valor_parcela: 150,
+      valor_pago: 0,
+      valor_saldo: 1800,
+      segunda_a_sexta: false,
       data: new Date().toISOString().split("T")[0],
       status: "pendente",
       valor_pago_mes: 0
@@ -469,12 +620,15 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
     }
   };
 
-  const handleAddDividaOutros = async () => {
+  const handleAddDividaOutros = async (tipo: 'aluguel' | 'divida' | 'outros' = 'divida') => {
     const tempId = "temp-div-" + Date.now();
+    let defaultDevedor = "Novo Devedor";
+    if (tipo === "aluguel") defaultDevedor = "Inquilino (Aluguel)";
+    
     const newDiv: DividaOutros = {
       id: tempId,
-      devedor: "Novo Devedor",
-      tipo: "divida",
+      devedor: defaultDevedor,
+      tipo: tipo,
       valor_total: 0,
       valor_pago: 0,
       saldo_devedor: 0,
@@ -614,8 +768,7 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
     pagamentosDiarios
     .reduce((acc, curr) => acc + (curr.valor_pago_mes || 0), 0) +
     dividasOutros
-    .filter(d => d.status === "pago")
-    .reduce((acc, curr) => acc + curr.valor_pago, 0);
+    .reduce((acc, curr) => acc + (curr.status === "pago" ? curr.valor_pago : (curr.valor_pago_mes || 0)), 0);
 
   const entradasPrevistas = receitas
     .filter(r => r.status_recebimento === "pendente")
@@ -625,7 +778,7 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
     .reduce((acc, curr) => acc + (curr.valor_saldo || 0), 0) +
     dividasOutros
     .filter(d => d.status !== "pago")
-    .reduce((acc, curr) => acc + (curr.valor_total - curr.valor_pago), 0);
+    .reduce((acc, curr) => acc + (curr.saldo_devedor !== undefined ? curr.saldo_devedor : (curr.valor_total - curr.valor_pago)), 0);
 
   const totalContasMes = despesas.reduce((acc, curr) => acc + curr.valor, 0) +
                          faturas.reduce((acc, curr) => acc + curr.valor_total, 0) +
@@ -776,23 +929,17 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl md:text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2 uppercase">
-            {activeView === "painel" && "VORTEX FINANCE"}
-            {activeView === "entradas" && "ENTRADAS & DIÁRIAS"}
-            {activeView === "saidas" && "SAÍDAS & BOLETOS"}
-            {activeView === "cartoes" && "FATURAS DE CARTÕES"}
-            {activeView === "dividas" && "ALUGUÉIS & RECEBÍVEIS"}
-            {activeView === "pagamentos" && "PRESTAÇÕES & CARNÊS"}
+            {activeView === "painel" && "CARTEIRA FINANCEIRA"}
+            {activeView === "entradas" && "ENTRADAS & RECEBIMENTOS"}
+            {activeView === "saidas" && "SAÍDAS & PAGAMENTOS"}
             <span className="text-[10px] font-mono font-normal px-2 py-0.5 border border-indigo-500/30 text-indigo-400 rounded">
-              {activeView === "painel" ? "Painel Geral" : activeView.toUpperCase()}
+              {activeView === "painel" ? "Carteira" : activeView.toUpperCase()}
             </span>
           </h1>
           <p className="text-[10px] text-slate-500 uppercase tracking-wider mt-1">
-            {activeView === "painel" && "Sincronização instantânea com banco de dados PostgreSQL"}
-            {activeView === "entradas" && "Registro de diárias, recebimentos e faturamento de veículos"}
-            {activeView === "saidas" && "Controle de despesas gerais, impostos e obrigações"}
-            {activeView === "cartoes" && "Gerenciamento de faturas e limites de cartões corporativos"}
-            {activeView === "dividas" && "Acompanhamento de aluguéis e dívidas ativas de terceiros"}
-            {activeView === "pagamentos" && "Acompanhamento de prestações, financiamentos e parcelas ativas"}
+            {activeView === "painel" && "Visão geral consolidada de todas as entradas, saídas e saldos"}
+            {activeView === "entradas" && "Registro de salários, ganhos de frota, aluguéis recebidos, bar e água, devedores e outros"}
+            {activeView === "saidas" && "Controle de despesas gerais, faturas de cartões, prestações e outros"}
           </p>
         </div>
         <button
@@ -804,6 +951,105 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           Sincronizar
         </button>
       </div>
+
+      {/* Indicador de Status do Banco de Dados */}
+      {dbStatus && (
+        <div className={`border rounded-xl p-4 transition-all duration-300 ${
+          dbStatus.mode === "supabase" 
+            ? "bg-emerald-950/10 border-emerald-500/20 text-emerald-400"
+            : dbStatus.mode === "supabase_missing_table"
+            ? "bg-amber-950/10 border-amber-500/30 text-amber-300"
+            : "bg-rose-950/10 border-rose-500/20 text-rose-300"
+        }`}>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <Database className="w-5 h-5 mt-0.5 flex-shrink-0" />
+              <div>
+                <h3 className="font-mono font-bold text-xs uppercase tracking-wider">
+                  {dbStatus.mode === "supabase" && "🟢 BANCO DE DADOS EM NUVEM (SUPABASE) CONECTADO"}
+                  {dbStatus.mode === "supabase_missing_table" && "⚠️ SUPABASE CONECTADO - TABELA NÃO ENCONTRADA"}
+                  {dbStatus.mode === "local_file" && "🔴 MODO DE ARMAZENAMENTO LOCAL TEMPORÁRIO"}
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                  {dbStatus.mode === "supabase" && "Seu aplicativo está totalmente integrado ao Supabase. Todos os seus dados, lançamentos e alterações estão seguros e salvos permanentemente na nuvem."}
+                  {dbStatus.mode === "supabase_missing_table" && "Suas chaves do Supabase estão configuradas, mas a tabela 'vortex_finance' ainda não foi criada. Crie a tabela usando o script SQL abaixo para começar a salvar permanentemente."}
+                  {dbStatus.mode === "local_file" && "Seus dados estão sendo guardados de forma temporária na memória do servidor. Eles SUMIRÃO quando o servidor reiniciar ou quando você atualizar/recompilar o aplicativo. Para salvar para sempre, você precisa configurar as variáveis de ambiente e criar a tabela no Supabase."}
+                </p>
+                {dbStatus.syncError && (
+                  <p className="text-[10px] font-mono text-rose-400 mt-1 uppercase">Erro do servidor: {dbStatus.syncError}</p>
+                )}
+              </div>
+            </div>
+            
+            {dbStatus.mode !== "supabase" && (
+              <button
+                onClick={() => setShowDbGuide(!showDbGuide)}
+                className="bg-slate-900 hover:bg-slate-800 text-slate-300 px-3 py-1.5 rounded border border-slate-800 font-mono text-[10px] uppercase tracking-wider flex items-center gap-1.5 transition-all self-start md:self-center cursor-pointer"
+              >
+                <Database className="w-3.5 h-3.5" />
+                {showDbGuide ? "Ocultar Instruções" : "Como Salvar Permanente?"}
+              </button>
+            )}
+          </div>
+
+          {/* Guia de Configuração e SQL */}
+          {showDbGuide && (
+            <div className="mt-4 border-t border-slate-800 pt-4 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2 text-xs text-slate-300">
+                  <p className="font-bold text-white uppercase tracking-wider font-mono text-[10px]">1. Configurar Variáveis de Ambiente no Host (Vercel ou outro):</p>
+                  <p>Defina as seguintes variáveis com as credenciais do seu projeto Supabase:</p>
+                  <ul className="list-disc pl-4 space-y-1 font-mono text-[10px] text-slate-400 bg-slate-950/50 p-2.5 rounded border border-slate-850">
+                    <li>SUPABASE_URL = <span className="text-cyan-400">https://seu-projeto.supabase.co</span></li>
+                    <li>SUPABASE_ANON_KEY = <span className="text-indigo-400 font-bold">sua-chave-anon-key-aqui</span></li>
+                  </ul>
+                  <p className="text-[10px] text-slate-400">Isso fará o aplicativo se conectar automaticamente ao seu banco de dados Supabase.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-bold text-white uppercase tracking-wider font-mono text-[10px]">2. Executar no SQL Editor do Supabase:</p>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(`-- Criar a tabela vortex_finance para persistência de dados
+CREATE TABLE IF NOT EXISTS vortex_finance (
+    id TEXT PRIMARY KEY,
+    data JSONB DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Inserir o registro padrão caso não exista
+INSERT INTO vortex_finance (id, data, updated_at)
+VALUES ('default', '{"receitas": [], "despesas": [], "faturas": [], "pagamentos_diarios": [], "dividas_outros": [], "prestacoes": [], "subscriptions": [], "passkeys": []}'::jsonb, now())
+ON CONFLICT (id) DO NOTHING;`);
+                        setSqlCopied(true);
+                        setTimeout(() => setSqlCopied(false), 2000);
+                      }}
+                      className="text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-mono text-[10px] uppercase cursor-pointer"
+                    >
+                      {sqlCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      {sqlCopied ? "Copiado!" : "Copiar SQL"}
+                    </button>
+                  </div>
+                  <pre className="text-[10px] font-mono text-slate-400 bg-slate-950 p-3 rounded border border-slate-900 overflow-x-auto max-h-36 leading-relaxed select-all">
+{`-- Criar a tabela vortex_finance para persistência de dados
+CREATE TABLE IF NOT EXISTS vortex_finance (
+    id TEXT PRIMARY KEY,
+    data JSONB DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Inserir o registro padrão caso não exista
+INSERT INTO vortex_finance (id, data, updated_at)
+VALUES ('default', '{"receitas": [], "despesas": [], "faturas": [], "pagamentos_diarios": [], "dividas_outros": [], "prestacoes": [], "subscriptions": [], "passkeys": []}'::jsonb, now())
+ON CONFLICT (id) DO NOTHING;`}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* RENDER VIEW: PAINEL */}
       {activeView === "painel" && (
@@ -952,325 +1198,705 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
       {!loading && (
         <div className="space-y-6">
           
-          {/* TABELA: RECEITAS */}
+          {/* TABELA: RECEITAS (ENTRADAS) */}
           {activeView === "entradas" && (
             <div className="space-y-6 w-full">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
-              >
-                <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                    <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">Receitas & Ganhos de Frota</h2>
-                  </div>
-                  <button
-                    onClick={handleAddReceita}
-                    disabled={addingReceita}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Adicionar Receita
-                  </button>
-                </div>
+              {/* Horizontal Scrollable Subtabs selector for ENTRADAS */}
+              <div className="flex gap-2 overflow-x-auto pb-2 border-b border-slate-800 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+                <button
+                  onClick={() => setSubTabEntradas("salario")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "salario"
+                      ? "bg-emerald-500/10 border-emerald-500 text-emerald-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <DollarSign className="w-3.5 h-3.5 text-emerald-500" />
+                  Salário
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {receitas.filter(r => r.categoria === "salario").reduce((acc, c) => acc + c.valor, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
-                        <th className="p-3">Descrição</th>
-                        <th className="p-3">Veículo / Placa</th>
-                        <th className="p-3 font-mono">Data</th>
-                        <th className="p-3 font-mono">Valor (R$)</th>
-                        <th className="p-3">Status</th>
-                        <th className="p-3 text-center">Recorrente</th>
-                        <th className="p-3 w-12 text-center">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-xs font-mono divide-y divide-slate-800/40">
-                      {receitas.length === 0 ? (
-                        <tr>
-                          <td colSpan={7} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum registro de receitas.</td>
+                <button
+                  onClick={() => setSubTabEntradas("carros")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "carros"
+                      ? "bg-indigo-500/10 border-indigo-500 text-indigo-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <Car className="w-3.5 h-3.5 text-indigo-400" />
+                  Carros
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {(
+                      receitas.filter(r => r.categoria === "carros").reduce((acc, c) => acc + c.valor, 0) +
+                      pagamentosDiarios.reduce((acc, c) => acc + (c.valor_pago_mes || 0), 0)
+                    ).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabEntradas("alugueis")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "alugueis"
+                      ? "bg-cyan-500/10 border-cyan-500 text-cyan-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5 text-cyan-400" />
+                  Aluguéis
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {(
+                      receitas.filter(r => r.categoria === "alugueis").reduce((acc, c) => acc + c.valor, 0) +
+                      dividasOutros.filter(d => d.tipo === "aluguel").reduce((acc, c) => acc + (c.status === "pago" ? c.valor_pago : (c.valor_pago_mes || 0)), 0)
+                    ).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabEntradas("bar_agua")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "bar_agua"
+                      ? "bg-blue-500/10 border-blue-500 text-blue-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <GlassWater className="w-3.5 h-3.5 text-blue-400" />
+                  Bar e Água
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {receitas.filter(r => r.categoria === "bar_agua").reduce((acc, c) => acc + c.valor, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabEntradas("devedores")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "devedores"
+                      ? "bg-amber-500/10 border-amber-500 text-amber-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5 text-amber-400" />
+                  Devedores
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {dividasOutros.filter(d => d.tipo === "divida").reduce((acc, c) => acc + (c.status === "pago" ? c.valor_pago : (c.valor_pago_mes || 0)), 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabEntradas("outros")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabEntradas === "outros"
+                      ? "bg-purple-500/10 border-purple-500 text-purple-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <MoreHorizontal className="w-3.5 h-3.5 text-purple-400" />
+                  Outros
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {receitas.filter(r => r.categoria === "outros" || !r.categoria).reduce((acc, c) => acc + c.valor, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+              </div>
+
+              {/* RENDER SUBTAB: SALARIO, BAR_AGUA, OUTROS, ALUGUEIS (Receitas) */}
+              {(subTabEntradas === "salario" || subTabEntradas === "bar_agua" || subTabEntradas === "outros" || subTabEntradas === "alugueis") && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
+                >
+                  <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                      <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">
+                        {subTabEntradas === "salario" && "Registro de Salário"}
+                        {subTabEntradas === "alugueis" && "Aluguéis Recebidos (Receitas)"}
+                        {subTabEntradas === "bar_agua" && "Ganhos do Bar & Água"}
+                        {subTabEntradas === "outros" && "Outras Receitas"}
+                      </h2>
+                    </div>
+                    <button
+                      onClick={() => handleAddReceita(subTabEntradas)}
+                      disabled={addingReceita}
+                      className="bg-emerald-600 hover:bg-emerald-750 text-white px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Adicionar Lançamento
+                    </button>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
+                          <th className="p-3">Descrição</th>
+                          {subTabEntradas === "carros" && <th className="p-3">Veículo / Placa</th>}
+                          <th className="p-3 font-mono">Data</th>
+                          <th className="p-3 font-mono">Valor (R$)</th>
+                          <th className="p-3">Status</th>
+                          <th className="p-3 text-center">Recorrente</th>
+                          <th className="p-3 w-12 text-center">Ações</th>
                         </tr>
-                      ) : (
-                        receitas.map(rec => (
-                          <tr key={rec.id} className="hover:bg-slate-850/30 group transition-colors duration-150">
-                            {/* Descricao */}
-                            <td className="p-2">
-                              <input
-                                type="text"
-                                value={rec.descricao}
-                                onChange={(e) => saveReceita(rec.id, { descricao: e.target.value })}
-                                className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-200 focus:outline-none"
-                              />
-                            </td>
-                            {/* Placa/Modelo */}
-                            <td className="p-2">
-                              <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all">
-                                <Car className="w-3.5 h-3.5 text-slate-600 pl-1" />
-                                <input
-                                  type="text"
-                                  placeholder="Placa / Modelo"
-                                  value={rec.placa_modelo || ""}
-                                  onChange={(e) => saveReceita(rec.id, { placa_modelo: e.target.value || null })}
-                                  className="w-full bg-transparent border-none py-1 px-1 text-slate-300 focus:outline-none placeholder:text-slate-700 text-xs"
-                                />
-                              </div>
-                            </td>
-                            {/* Data */}
-                            <td className="p-2">
-                              <input
-                                type="date"
-                                value={rec.data}
-                                onChange={(e) => saveReceita(rec.id, { data: e.target.value })}
-                                className="bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-300 focus:outline-none font-mono text-xs"
-                              />
-                            </td>
-                            {/* Valor */}
-                            <td className="p-2">
-                              <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all px-2">
-                                <span className="text-slate-600">R$</span>
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  value={rec.valor || ""}
-                                  onChange={(e) => saveReceita(rec.id, { valor: parseFloat(e.target.value) || 0 })}
-                                  className="w-full bg-transparent border-none py-1 focus:outline-none text-emerald-400 font-bold"
-                                />
-                              </div>
-                            </td>
-                            {/* Status */}
-                            <td className="p-2">
-                              <button
-                                onClick={() => saveReceita(rec.id, { 
-                                  status_recebimento: rec.status_recebimento === "recebido" ? "pendente" : "recebido" 
-                                })}
-                                className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all duration-150 cursor-pointer border ${
-                                  rec.status_recebimento === "recebido"
-                                    ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
-                                    : "bg-orange-500/5 border-orange-500/20 text-orange-400"
-                                }`}
-                              >
-                                {rec.status_recebimento === "recebido" ? "RECB" : "PEND"}
-                              </button>
-                            </td>
-                            {/* Recorrente */}
-                            <td className="p-2 text-center">
-                              <button
-                                onClick={() => saveReceita(rec.id, { recorrente: !rec.recorrente })}
-                                className={`p-1.5 rounded transition-all duration-150 cursor-pointer ${
-                                  rec.recorrente 
-                                    ? "text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20" 
-                                    : "text-slate-600 hover:text-slate-400 hover:bg-slate-800"
-                                }`}
-                                title={rec.recorrente ? "Receita Recorrente Ativa (Todo mês entra)" : "Ativar Receita Recorrente"}
-                              >
-                                <Repeat className="w-3.5 h-3.5" />
-                              </button>
-                            </td>
-                            {/* Delete */}
-                            <td className="p-2 text-center">
-                              <button
-                                onClick={() => handleDeleteReceita(rec.id)}
-                                className="text-slate-600 hover:text-rose-400 p-1 rounded hover:bg-rose-500/5 transition-all duration-200 cursor-pointer"
-                                title="Deletar receita"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                      </thead>
+                      <tbody className="text-xs font-mono divide-y divide-slate-800/40">
+                        {receitas.filter(r => r.categoria === subTabEntradas || (subTabEntradas === "outros" && (!r.categoria || r.categoria === "outros"))).length === 0 ? (
+                          <tr>
+                            <td colSpan={subTabEntradas === "carros" ? 7 : 6} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">
+                              Nenhum registro encontrado nesta categoria.
                             </td>
                           </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </motion.div>
-
-              {/* TABELA: PAGAMENTOS DIÁRIOS & PARCELAS */}
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
-              >
-                <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-400" />
-                    <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">Pagamentos Diários & Prestações</h2>
-                  </div>
-                  <button
-                    onClick={handleAddPagamentoDiario}
-                    disabled={addingPagamento}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Adicionar Pagamento
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
-                        <th className="p-3">Descrição da Prestação</th>
-                        <th className="p-3 text-center">Nº Parcelas</th>
-                        <th className="p-3 font-mono">Valor Parcela (R$)</th>
-                        <th className="p-3 font-mono">Valor Pago (R$)</th>
-                        <th className="p-3 font-mono">Valor de Saldo (R$)</th>
-                        <th className="p-3 font-mono">Recebido no Mês (R$)</th>
-                        <th className="p-3 font-mono text-center">Data da Última Prestação Paga</th>
-                        <th className="p-3 text-center">Registrar Pago</th>
-                        <th className="p-3 text-center">Status</th>
-                        <th className="p-3 w-12 text-center">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-xs font-mono divide-y divide-slate-800/40">
-                      {pagamentosDiarios.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum pagamento diário registrado.</td>
-                        </tr>
-                      ) : (
-                        pagamentosDiarios.map(pag => {
-                          const valParcela = pag.valor_parcela !== undefined ? pag.valor_parcela : (pag.valor_parcela || 100);
-                          const valPagoMes = pag.valor_pago_mes !== undefined ? pag.valor_pago_mes : 0;
-                          
-                          // Quick increment payment handlers
-                          const handleQuickPay = (increments: number) => {
-                            const newParcelaAtual = Math.min(pag.parcela_total, pag.parcela_atual + increments);
-                            const addedValue = (newParcelaAtual - pag.parcela_atual) * valParcela;
-                            
-                            savePagamentoDiario(pag.id, {
-                              parcela_atual: newParcelaAtual,
-                              valor_pago_mes: valPagoMes + addedValue,
-                              data: new Date().toISOString().split("T")[0] // Date of last payment: Today
-                            });
-                          };
-
-                          return (
-                            <tr key={pag.id} className="hover:bg-slate-850/30 group transition-colors duration-150">
-                              {/* Descrição */}
-                              <td className="p-3 text-slate-200 font-medium font-sans">
-                                {pag.descricao}
-                              </td>
-                              
-                              {/* Parcelas */}
-                              <td className="p-3 text-center text-slate-300 font-bold">
-                                {pag.parcela_atual} <span className="text-slate-600">/</span> {pag.parcela_total}
-                              </td>
-
-                              {/* Valor da Parcela */}
+                        ) : (
+                          receitas.filter(r => r.categoria === subTabEntradas || (subTabEntradas === "outros" && (!r.categoria || r.categoria === "outros"))).map(rec => (
+                            <tr key={rec.id} className="hover:bg-slate-850/30 group transition-colors duration-150">
+                              {/* Descricao */}
                               <td className="p-2">
-                                <div className="flex items-center gap-1 bg-slate-950 border border-slate-800/60 rounded focus-within:border-indigo-500 transition-all px-2 py-0.5 max-w-[110px]">
-                                  <span className="text-slate-500 text-[10px] font-bold">R$</span>
+                                <input
+                                  type="text"
+                                  value={rec.descricao}
+                                  onChange={(e) => saveReceita(rec.id, { descricao: e.target.value })}
+                                  className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-200 focus:outline-none"
+                                />
+                              </td>
+                              {/* Placa/Modelo */}
+                              {subTabEntradas === "carros" && (
+                                <td className="p-2">
+                                  <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all">
+                                    <Car className="w-3.5 h-3.5 text-slate-600 pl-1" />
+                                    <input
+                                      type="text"
+                                      placeholder="Placa / Modelo"
+                                      value={rec.placa_modelo || ""}
+                                      onChange={(e) => saveReceita(rec.id, { placa_modelo: e.target.value || null })}
+                                      className="w-full bg-transparent border-none py-1 px-1 text-slate-300 focus:outline-none placeholder:text-slate-700 text-xs"
+                                    />
+                                  </div>
+                                </td>
+                              )}
+                              {/* Data */}
+                              <td className="p-2">
+                                <input
+                                  type="date"
+                                  value={rec.data}
+                                  onChange={(e) => saveReceita(rec.id, { data: e.target.value })}
+                                  className="bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-300 focus:outline-none font-mono text-xs"
+                                />
+                              </td>
+                              {/* Valor */}
+                              <td className="p-2">
+                                <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all px-2">
+                                  <span className="text-slate-600">R$</span>
                                   <input
                                     type="number"
                                     step="0.01"
-                                    value={valParcela}
-                                    onChange={(e) => savePagamentoDiario(pag.id, { valor_parcela: parseFloat(e.target.value) || 0 })}
-                                    className="w-full bg-transparent border-none py-1 focus:outline-none text-slate-200 font-bold text-xs"
+                                    value={rec.valor || ""}
+                                    onChange={(e) => saveReceita(rec.id, { valor: parseFloat(e.target.value) || 0 })}
+                                    className="w-full bg-transparent border-none py-1 focus:outline-none text-emerald-400 font-bold"
                                   />
                                 </div>
                               </td>
-
-                              {/* Valor Pago */}
-                              <td className="p-3 text-indigo-400 font-bold text-xs">
-                                R$ {(pag.valor_pago ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </td>
-
-                              {/* Valor Saldo */}
-                              <td className="p-3 text-emerald-400 font-medium text-xs">
-                                R$ {(pag.valor_saldo ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </td>
-
-                              {/* Recebido no Mês */}
-                              <td className="p-3 text-indigo-300 font-bold text-xs">
-                                R$ {valPagoMes.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </td>
-
-                              {/* Data da Última Prestação Paga */}
-                              <td className="p-3 text-center text-slate-300">
-                                {pag.data ? pag.data.split('-').reverse().join('/') : '-'}
-                              </td>
-
-                              {/* Registrar Pago */}
-                              <td className="p-2 text-center min-w-[155px]">
-                                <div className="flex items-center justify-center gap-2">
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    max={pag.parcela_total - pag.parcela_atual}
-                                    value={payQuantities[pag.id] ?? 1}
-                                    onChange={(e) => {
-                                      const val = Math.max(1, parseInt(e.target.value) || 1);
-                                      setPayQuantities(prev => ({ ...prev, [pag.id]: val }));
-                                    }}
-                                    className="w-12 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded px-1 py-1 text-center text-white text-xs font-bold font-mono focus:outline-none"
-                                  />
-                                  <button
-                                    onClick={() => {
-                                      const qty = payQuantities[pag.id] ?? 1;
-                                      handleQuickPay(qty);
-                                      setPayQuantities(prev => ({ ...prev, [pag.id]: 1 }));
-                                    }}
-                                    disabled={pag.parcela_atual >= pag.parcela_total}
-                                    className="bg-indigo-600 hover:bg-indigo-500 hover:shadow-indigo-500/20 shadow-md text-white font-mono text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all duration-200 cursor-pointer disabled:opacity-30 disabled:pointer-events-none active:scale-95 uppercase tracking-wider"
-                                  >
-                                    Pagar
-                                  </button>
-                                </div>
-                              </td>
-
                               {/* Status */}
+                              <td className="p-2">
+                                <div className="flex items-center gap-1.5 justify-start">
+                                  <button
+                                    onClick={() => saveReceita(rec.id, { 
+                                      status_recebimento: rec.status_recebimento === "recebido" ? "pendente" : "recebido" 
+                                    })}
+                                    className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all duration-150 cursor-pointer border ${
+                                      rec.status_recebimento === "recebido"
+                                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
+                                        : "bg-orange-500/5 border-orange-500/20 text-orange-400"
+                                    }`}
+                                  >
+                                    {rec.status_recebimento === "recebido" ? "RECB" : "PEND"}
+                                  </button>
+                                  
+                                  {rec.status_recebimento === "pendente" && (
+                                    <button
+                                      onClick={() => handleMarkAsPaidAndRollover(rec)}
+                                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider transition-all duration-200 cursor-pointer flex items-center gap-1 shadow-sm active:scale-95 border border-emerald-500/30"
+                                      title="Receber este mês (registra na carteira) e avançar data para o próximo mês"
+                                    >
+                                      <Check className="w-2.5 h-2.5" /> Pago
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                              {/* Recorrente */}
                               <td className="p-2 text-center">
                                 <button
-                                  onClick={() => savePagamentoDiario(pag.id, { 
-                                    status: pag.status === "recebido" ? "pendente" : "recebido" 
-                                  })}
-                                  className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all duration-150 cursor-pointer border ${
-                                    pag.status === "recebido"
-                                      ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
-                                      : "bg-orange-500/5 border-orange-500/20 text-orange-400"
+                                  onClick={() => saveReceita(rec.id, { recorrente: !rec.recorrente })}
+                                  className={`p-1.5 rounded transition-all duration-150 cursor-pointer ${
+                                    rec.recorrente 
+                                      ? "text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20" 
+                                      : "text-slate-600 hover:text-slate-400 hover:bg-slate-800"
                                   }`}
+                                  title={rec.recorrente ? "Receita Recorrente Ativa (Todo mês entra)" : "Ativar Receita Recorrente"}
                                 >
-                                  {pag.status === "recebido" ? "PAGO" : "PEND"}
+                                  <Repeat className="w-3.5 h-3.5" />
                                 </button>
                               </td>
-
                               {/* Delete */}
                               <td className="p-2 text-center">
                                 <button
-                                  onClick={() => handleDeletePagamentoDiario(pag.id)}
+                                  onClick={() => handleDeleteReceita(rec.id)}
                                   className="text-slate-600 hover:text-rose-400 p-1 rounded hover:bg-rose-500/5 transition-all duration-200 cursor-pointer"
-                                  title="Deletar pagamento"
+                                  title="Deletar receita"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               </td>
                             </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </motion.div>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* CARROS EXTRA TABLE: PAGAMENTOS DIÁRIOS & PRESTAÇÕES DO VEÍCULO (FATURAMENTO DE VEÍCULOS) */}
+              {subTabEntradas === "carros" && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg mt-6"
+                >
+                  <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                      <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">Faturamento de Veículos</h2>
+                    </div>
+                    <button
+                      onClick={handleAddPagamentoDiario}
+                      disabled={addingPagamento}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer font-bold"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Adicionar Lançamento
+                    </button>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
+                          <th className="p-3">Nome</th>
+                          <th className="p-3">Veículo</th>
+                          <th className="p-3 text-center">Quantidade de Parcelas</th>
+                          <th className="p-3 text-center">Parcelas Pagas</th>
+                          <th className="p-3 font-mono text-center">Valor Parcela (R$)</th>
+                          <th className="p-3 font-mono">Valor Pago</th>
+                          <th className="p-3 font-mono">Valor Restante</th>
+                          <th className="p-3 font-mono text-center">Último Pagamento Data</th>
+                          <th className="p-3 text-center">Registrar Pagamento</th>
+                          <th className="p-3 w-12 text-center">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-xs font-mono divide-y divide-slate-800/40">
+                        {pagamentosDiarios.length === 0 ? (
+                          <tr>
+                            <td colSpan={10} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum faturamento de veículo registrado.</td>
+                          </tr>
+                        ) : (
+                          pagamentosDiarios.map(pag => {
+                            const valParcela = pag.valor_parcela !== undefined && pag.valor_parcela !== null ? pag.valor_parcela : 100;
+                            const valPagoMes = pag.valor_pago_mes !== undefined ? pag.valor_pago_mes : 0;
+                            
+                            const handleQuickPay = (increments: number) => {
+                               const newParcelaAtual = Math.min(pag.parcela_total, pag.parcela_atual + increments);
+                               const addedValue = (newParcelaAtual - pag.parcela_atual) * valParcela;
+                               
+                               savePagamentoDiario(pag.id, {
+                                 parcela_atual: newParcelaAtual,
+                                 valor_pago_mes: valPagoMes + addedValue,
+                                 data: new Date().toISOString().split("T")[0]
+                               });
+                            };
+
+                            return (
+                              <tr key={pag.id} className="hover:bg-slate-850/30 group transition-colors duration-150">
+                                {/* Nome */}
+                                <td className="p-2 min-w-[150px]">
+                                  <input
+                                    type="text"
+                                    value={pag.descricao}
+                                    onChange={(e) => savePagamentoDiario(pag.id, { descricao: e.target.value })}
+                                    className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-200 focus:outline-none"
+                                  />
+                                </td>
+                                
+                                {/* Veiculo */}
+                                <td className="p-2 min-w-[150px]">
+                                  <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all">
+                                    <Car className="w-3.5 h-3.5 text-slate-600 pl-1" />
+                                    <input
+                                      type="text"
+                                      placeholder="Modelo / Placa"
+                                      value={pag.veiculo || ""}
+                                      onChange={(e) => savePagamentoDiario(pag.id, { veiculo: e.target.value })}
+                                      className="w-full bg-transparent border-none py-1 px-1 text-slate-300 focus:outline-none placeholder:text-slate-750 text-xs font-mono"
+                                    />
+                                  </div>
+                                </td>
+
+                                {/* Quantidade de Parcelas */}
+                                <td className="p-2 text-center">
+                                  <input
+                                    type="number"
+                                    value={pag.parcela_total}
+                                    onChange={(e) => savePagamentoDiario(pag.id, { parcela_total: parseInt(e.target.value) || 0 })}
+                                    className="w-16 bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-center text-slate-300 focus:outline-none font-bold font-mono"
+                                  />
+                                </td>
+
+                                {/* Parcelas Pagas */}
+                                <td className="p-2 text-center">
+                                  <input
+                                    type="number"
+                                    value={pag.parcela_atual}
+                                    onChange={(e) => savePagamentoDiario(pag.id, { parcela_atual: parseInt(e.target.value) || 0 })}
+                                    className="w-16 bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-center text-emerald-400 focus:outline-none font-bold font-mono"
+                                  />
+                                </td>
+
+                                {/* Valor Parcela */}
+                                <td className="p-2">
+                                  <div className="flex items-center justify-center gap-1 bg-slate-950/50 hover:bg-slate-950 border border-slate-800/60 rounded px-2 py-0.5 mx-auto max-w-[110px]">
+                                    <span className="text-slate-500 text-[10px] font-bold">R$</span>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={valParcela}
+                                      onChange={(e) => savePagamentoDiario(pag.id, { valor_parcela: parseFloat(e.target.value) || 0 })}
+                                      className="flex-1 min-w-0 bg-transparent border-none py-1 focus:outline-none text-slate-200 font-bold text-xs font-mono"
+                                    />
+                                  </div>
+                                </td>
+
+                                {/* Valor Pago */}
+                                <td className="p-3 text-emerald-400 font-bold text-xs whitespace-nowrap">
+                                  R$ {(pag.valor_pago ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </td>
+
+                                {/* Valor Restante */}
+                                <td className="p-3 text-rose-400 font-bold text-xs whitespace-nowrap">
+                                  R$ {(pag.valor_saldo ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </td>
+
+                                {/* Ultimo Pagamento Data */}
+                                <td className="p-2 text-center">
+                                  <input
+                                    type="date"
+                                    value={pag.data}
+                                    onChange={(e) => savePagamentoDiario(pag.id, { data: e.target.value })}
+                                    className="bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-300 focus:outline-none font-mono text-xs"
+                                  />
+                                </td>
+
+                                {/* Registrar Pagamento (BOTAO RAPIDO PAGAR) */}
+                                <td className="p-2 text-center min-w-[110px]">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={pag.parcela_total - pag.parcela_atual}
+                                      value={payQuantities[pag.id] ?? 1}
+                                      onChange={(e) => {
+                                        const val = Math.max(1, parseInt(e.target.value) || 1);
+                                        setPayQuantities(prev => ({ ...prev, [pag.id]: val }));
+                                      }}
+                                      className="w-9 bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-center text-white text-xs font-bold font-mono focus:outline-none"
+                                    />
+                                    <button
+                                      onClick={() => {
+                                        const qty = payQuantities[pag.id] ?? 1;
+                                        handleQuickPay(qty);
+                                        setPayQuantities(prev => ({ ...prev, [pag.id]: 1 }));
+                                      }}
+                                      disabled={pag.parcela_atual >= pag.parcela_total}
+                                      className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-mono text-[10px] font-bold px-2.5 py-1.5 rounded uppercase tracking-wider transition-all duration-200 cursor-pointer flex items-center gap-1 shadow-md active:scale-95"
+                                      title="Registrar pagamento rápido"
+                                    >
+                                      <Check className="w-3 h-3" /> Pagar
+                                    </button>
+                                  </div>
+                                </td>
+
+                                {/* Ações */}
+                                <td className="p-2 text-center">
+                                  <button
+                                    onClick={() => handleDeletePagamentoDiario(pag.id)}
+                                    className="text-slate-600 hover:text-rose-400 p-1.5 rounded hover:bg-rose-500/5 transition-all duration-200 cursor-pointer"
+                                    title="Excluir lançamento"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* ALUGUÉIS / DEVEDORES / OUTROS: TABLE FOR DIVIDAS_OUTROS */}
+              {(subTabEntradas === "alugueis" || subTabEntradas === "devedores" || subTabEntradas === "outros") && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg mt-6"
+                >
+                  <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-cyan-400" />
+                      <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">
+                        {subTabEntradas === "alugueis" && "Aluguéis de Imóveis & Cobrança de Terceiros"}
+                        {subTabEntradas === "devedores" && "Dívidas de Terceiros & Devedores Ativos"}
+                        {subTabEntradas === "outros" && "Outras Pendências Ativas de Terceiros"}
+                      </h2>
+                    </div>
+                    <button
+                      onClick={() => handleAddDividaOutros(subTabEntradas === "alugueis" ? "aluguel" : subTabEntradas === "devedores" ? "divida" : "outros")}
+                      disabled={addingDivida}
+                      className="bg-cyan-600 hover:bg-cyan-700 text-white px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Adicionar Cobrança
+                    </button>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
+                          <th className="p-3">Devedor / Nome</th>
+                          <th className="p-3 font-mono">Valor Parcela (R$)</th>
+                          <th className="p-3 font-mono text-center w-24">Prestações Pagas</th>
+                          <th className="p-3 font-mono text-center w-24">Total Prestações</th>
+                          <th className="p-3 font-mono">Restante (R$)</th>
+                          <th className="p-3">Vencimento</th>
+                          <th className="p-3 text-center">Status</th>
+                          <th className="p-3 text-center">Pagar</th>
+                          <th className="p-3 w-12 text-center">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-xs font-mono divide-y divide-slate-800/40">
+                        {dividasOutros.filter(d => 
+                          (subTabEntradas === "alugueis" && d.tipo === "aluguel") ||
+                          (subTabEntradas === "devedores" && d.tipo === "divida") ||
+                          (subTabEntradas === "outros" && (d.tipo === "outros" || !d.tipo))
+                        ).length === 0 ? (
+                          <tr>
+                            <td colSpan={9} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum registro ativo.</td>
+                          </tr>
+                        ) : (
+                          dividasOutros.filter(d => 
+                            (subTabEntradas === "alugueis" && d.tipo === "aluguel") ||
+                            (subTabEntradas === "devedores" && d.tipo === "divida") ||
+                            (subTabEntradas === "outros" && (d.tipo === "outros" || !d.tipo))
+                          ).map(div => {
+                            const valParcela = div.valor_parcela !== undefined ? div.valor_parcela : (div.valor_total || 0);
+                            const parcPagas = div.parcela_atual !== undefined ? div.parcela_atual : 0;
+                            const parcTotal = div.parcela_total !== undefined ? div.parcela_total : 12;
+                            const remaining = Math.max(0, (parcTotal - parcPagas) * valParcela);
+
+                            return (
+                              <tr key={div.id} className="hover:bg-slate-850/30 group transition-colors duration-150">
+                                {/* Nome / Devedor */}
+                                <td className="p-2">
+                                  <input
+                                    type="text"
+                                    value={div.devedor}
+                                    onChange={(e) => saveDividaOutros(div.id, { devedor: e.target.value })}
+                                    className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-200 focus:outline-none"
+                                  />
+                                </td>
+
+                                {/* Valor da Parcela */}
+                                <td className="p-2">
+                                  <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all px-2">
+                                    <span className="text-slate-600">R$</span>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={valParcela}
+                                      onChange={(e) => saveDividaOutros(div.id, { valor_parcela: parseFloat(e.target.value) || 0 })}
+                                      className="w-full bg-transparent border-none py-1 focus:outline-none text-cyan-400 font-bold"
+                                    />
+                                  </div>
+                                </td>
+
+                                {/* Prestações Pagas */}
+                                <td className="p-2 w-24">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={parcTotal}
+                                    value={parcPagas}
+                                    onChange={(e) => saveDividaOutros(div.id, { parcela_atual: Math.min(parcTotal, Math.max(0, parseInt(e.target.value) || 0)) })}
+                                    className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-center text-indigo-400 font-bold focus:outline-none"
+                                  />
+                                </td>
+
+                                {/* Total Prestações */}
+                                <td className="p-2 w-24">
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={parcTotal}
+                                    onChange={(e) => saveDividaOutros(div.id, { parcela_total: Math.max(1, parseInt(e.target.value) || 1) })}
+                                    className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-center text-slate-300 font-bold focus:outline-none"
+                                  />
+                                </td>
+
+                                {/* Restante */}
+                                <td className="p-3 font-bold text-amber-400 text-xs whitespace-nowrap">
+                                  R$ {remaining.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </td>
+
+                                {/* Vencimento */}
+                                <td className="p-2">
+                                  <input
+                                    type="date"
+                                    value={div.data_vencimento}
+                                    onChange={(e) => saveDividaOutros(div.id, { data_vencimento: e.target.value })}
+                                    className="bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-300 focus:outline-none font-mono text-xs"
+                                  />
+                                </td>
+
+                                {/* Status */}
+                                <td className="p-2 text-center">
+                                  <button
+                                    onClick={() => saveDividaOutros(div.id, { 
+                                      status: div.status === "pago" ? "pendente" : "pago" 
+                                    })}
+                                    className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all duration-150 cursor-pointer border ${
+                                      div.status === "pago"
+                                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
+                                        : "bg-orange-500/5 border-orange-500/20 text-orange-400"
+                                    }`}
+                                  >
+                                    {div.status === "pago" ? "PAGO" : "PEND"}
+                                  </button>
+                                </td>
+
+                                {/* Botão Pagar & Avançar Data */}
+                                <td className="p-2 text-center">
+                                  <button
+                                    onClick={() => handlePayDividaAndRollover(div)}
+                                    disabled={parcPagas >= parcTotal}
+                                    className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-mono text-[9px] font-bold px-2.5 py-1 rounded uppercase tracking-wider transition-all duration-200 cursor-pointer flex items-center justify-center gap-1 shadow-sm active:scale-95 border border-emerald-500/30 mx-auto"
+                                    title="Receber parcela, avançar data para o próximo mês e deixar como pendente"
+                                  >
+                                    <Check className="w-2.5 h-2.5" /> Pagar
+                                  </button>
+                                </td>
+
+                                {/* Ações */}
+                                <td className="p-2 text-center">
+                                  <button
+                                    onClick={() => handleDeleteDividaOutros(div.id)}
+                                    className="text-slate-600 hover:text-rose-400 p-1 rounded hover:bg-rose-500/5 transition-all duration-200 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )}
             </div>
           )}
 
-          {/* TABELA: DESPESAS */}
+          {/* TABELA: DESPESAS (SAÍDAS) */}
           {activeView === "saidas" && (
             <div className="space-y-6 w-full">
-              {/* CARD 1: DESPESAS & COMPROMISSOS GERAIS */}
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
-              >
+              {/* Horizontal Scrollable Subtabs selector for SAÍDAS */}
+              <div className="flex gap-2 overflow-x-auto pb-2 border-b border-slate-800 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+                <button
+                  onClick={() => setSubTabSaidas("alugueis")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabSaidas === "alugueis"
+                      ? "bg-rose-500/10 border-rose-500 text-rose-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5 text-rose-400" />
+                  Aluguéis
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {despesas.filter(d => d.categoria === "alugueis").reduce((acc, c) => acc + c.valor, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabSaidas("cartoes")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabSaidas === "cartoes"
+                      ? "bg-indigo-500/10 border-indigo-500 text-indigo-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <CreditCard className="w-3.5 h-3.5 text-indigo-400" />
+                  Cartões
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {faturas.reduce((acc, c) => acc + (c.gastos_totais || 0), 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabSaidas("dividas")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabSaidas === "dividas"
+                      ? "bg-amber-500/10 border-amber-500 text-amber-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <HandCoins className="w-3.5 h-3.5 text-amber-400" />
+                  Dívidas
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {prestacoes.filter(p => p.status === "pendente").reduce((acc, c) => acc + c.valor_parcela, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setSubTabSaidas("outros")}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-mono uppercase tracking-wider border whitespace-nowrap transition-all duration-200 cursor-pointer ${
+                    subTabSaidas === "outros"
+                      ? "bg-purple-500/10 border-purple-500 text-purple-400 font-bold"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700"
+                  }`}
+                >
+                  <MoreHorizontal className="w-3.5 h-3.5 text-purple-400" />
+                  Outros
+                  <span className="ml-1.5 bg-slate-950 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                    R$ {despesas.filter(d => d.categoria === "outros" || !d.categoria).reduce((acc, c) => acc + c.valor, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </button>
+              </div>
+
+              {/* RENDER SUBTAB: ALUGUEIS E OUTROS (DESPESAS GERAIS) */}
+              {(subTabSaidas === "alugueis" || subTabSaidas === "outros") && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
+                >
                 <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-rose-500" />
-                    <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">Despesas & Compromissos Gerais</h2>
+                    <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">
+                      {subTabSaidas === "alugueis" ? "Compromissos de Aluguel (Saídas)" : "Despesas & Compromissos Diversos"}
+                    </h2>
                   </div>
                   <button
-                    onClick={() => handleAddDespesa("geral")}
+                    onClick={() => handleAddDespesa(subTabSaidas)}
                     disabled={addingDespesa}
                     className="bg-rose-950/20 hover:bg-rose-950/40 text-rose-400 border border-rose-500/20 px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
                   >
@@ -1291,12 +1917,12 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
                       </tr>
                     </thead>
                     <tbody className="text-xs font-mono divide-y divide-slate-800/40">
-                      {despesas.filter(d => !d.tipo || d.tipo === "geral").length === 0 ? (
+                      {despesas.filter(d => d.categoria === subTabSaidas || (subTabSaidas === "outros" && (!d.categoria || d.categoria === "outros"))).length === 0 ? (
                         <tr>
-                          <td colSpan={6} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum compromisso geral registrado.</td>
+                          <td colSpan={6} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase font-bold">Nenhuma despesa registrada nesta categoria.</td>
                         </tr>
                       ) : (
-                        despesas.filter(d => !d.tipo || d.tipo === "geral").map(des => {
+                        despesas.filter(d => d.categoria === subTabSaidas || (subTabSaidas === "outros" && (!d.categoria || d.categoria === "outros"))).map(des => {
                           const hasChanges = unsavedDespesaIds.includes(des.id);
                           const isSaving = savingDespesaIds.includes(des.id);
                           return (
@@ -1412,166 +2038,10 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
                   </table>
                 </div>
               </motion.div>
+            )}
 
-              {/* CARD 2: GASTOS ADICIONAIS */}
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg"
-              >
-                <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-amber-500" />
-                    <h2 className="font-mono text-xs uppercase tracking-wider font-bold text-slate-200">Gastos Adicionais</h2>
-                  </div>
-                  <button
-                    onClick={() => handleAddDespesa("adicional")}
-                    disabled={addingDespesa}
-                    className="bg-amber-950/20 hover:bg-amber-950/40 text-amber-400 border border-amber-500/20 px-2.5 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider flex items-center gap-1 transition-all duration-300 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Adicionar Gasto Adicional
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-800 bg-slate-950/50 text-[10px] uppercase text-slate-500 font-mono sticky top-0">
-                        <th className="p-3">Descrição do Gasto</th>
-                        <th className="p-3">Vencimento</th>
-                        <th className="p-3 font-mono">Valor (R$)</th>
-                        <th className="p-3">Status</th>
-                        <th className="p-3 text-center">Recorrente</th>
-                        <th className="p-3 w-12 text-center">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-xs font-mono divide-y divide-slate-800/40">
-                      {despesas.filter(d => d.tipo === "adicional").length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="text-center py-6 text-slate-600 font-mono text-[11px] uppercase">Nenhum gasto adicional registrado.</td>
-                        </tr>
-                      ) : (
-                        despesas.filter(d => d.tipo === "adicional").map(des => {
-                          const hasChanges = unsavedDespesaIds.includes(des.id);
-                          const isSaving = savingDespesaIds.includes(des.id);
-                          return (
-                            <tr 
-                              key={des.id} 
-                              className={`transition-colors duration-150 ${
-                                hasChanges 
-                                  ? "bg-indigo-950/5 hover:bg-indigo-950/10 border-l-2 border-indigo-500" 
-                                  : "hover:bg-slate-850/30"
-                              }`}
-                            >
-                              {/* Descricao */}
-                              <td className="p-2">
-                                <input
-                                  type="text"
-                                  value={des.descricao}
-                                  onChange={(e) => updateDespesaLocally(des.id, { descricao: e.target.value })}
-                                  className="w-full bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 text-slate-200 focus:outline-none"
-                                />
-                              </td>
-                              {/* Data Vencimento */}
-                              <td className="p-2">
-                                <input
-                                  type="date"
-                                  value={des.data_vencimento}
-                                  onChange={(e) => updateDespesaLocally(des.id, { data_vencimento: e.target.value })}
-                                  className={`bg-transparent hover:bg-slate-950/50 focus:bg-slate-950 focus:border-slate-700 border border-transparent rounded px-2 py-1 focus:outline-none font-mono text-xs text-slate-300`}
-                                />
-                              </td>
-                              {/* Valor */}
-                              <td className="p-2">
-                                <div className="flex items-center gap-1 bg-transparent hover:bg-slate-950/50 border border-transparent rounded focus-within:bg-slate-950 focus-within:border-slate-700 transition-all px-2">
-                                  <span className="text-slate-600">R$</span>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    value={des.valor || ""}
-                                    onChange={(e) => updateDespesaLocally(des.id, { valor: parseFloat(e.target.value) || 0 })}
-                                    className="w-full bg-transparent border-none py-1 focus:outline-none text-rose-400 font-bold"
-                                  />
-                                </div>
-                              </td>
-                              {/* Status */}
-                              <td className="p-2">
-                                <button
-                                  onClick={() => updateDespesaLocally(des.id, { 
-                                    status_pagamento: des.status_pagamento === "pago" ? "pendente" : "pago" 
-                                  })}
-                                  className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all duration-150 cursor-pointer border ${
-                                    des.status_pagamento === "pago"
-                                      ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
-                                      : "bg-rose-500/5 border-rose-500/20 text-rose-400"
-                                  }`}
-                                >
-                                  {des.status_pagamento === "pago" ? "PAGO" : "PEND"}
-                                </button>
-                              </td>
-                              {/* Recorrente */}
-                              <td className="p-2 text-center">
-                                <button
-                                  onClick={() => updateDespesaLocally(des.id, { recorrente: !des.recorrente })}
-                                  className={`p-1.5 rounded transition-all duration-150 cursor-pointer ${
-                                    des.recorrente 
-                                      ? "text-rose-400 bg-rose-500/10 hover:bg-rose-500/20" 
-                                      : "text-slate-600 hover:text-slate-400 hover:bg-slate-800"
-                                  }`}
-                                  title={des.recorrente ? "Pagamento Recorrente Ativo (Todo mês entra)" : "Ativar Pagamento Recorrente"}
-                                >
-                                  <Repeat className="w-3.5 h-3.5" />
-                                </button>
-                              </td>
-                              {/* Ações */}
-                              <td className="p-2 text-center">
-                                <div className="flex items-center justify-center gap-2">
-                                  {hasChanges && (
-                                    <>
-                                      <button
-                                        onClick={() => handleSaveDespesa(des.id)}
-                                        disabled={isSaving}
-                                        className="text-emerald-400 hover:text-emerald-300 p-1.5 rounded hover:bg-emerald-500/10 transition-all duration-200 cursor-pointer flex items-center justify-center relative group"
-                                        title="Salvar alterações"
-                                      >
-                                        {isSaving ? (
-                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                        ) : (
-                                          <Save className="w-3.5 h-3.5" />
-                                        )}
-                                      </button>
-                                      
-                                      <button
-                                        onClick={() => cancelDespesaChanges(des.id)}
-                                        className="text-orange-400 hover:text-orange-300 p-1.5 rounded hover:bg-orange-500/10 transition-all duration-200 cursor-pointer flex items-center justify-center relative group"
-                                        title="Desfazer alterações"
-                                      >
-                                        <Undo className="w-3.5 h-3.5" />
-                                      </button>
-                                    </>
-                                  )}
-                                  <button
-                                    onClick={() => handleDeleteDespesa(des.id)}
-                                    className="text-slate-600 hover:text-rose-400 p-1.5 rounded hover:bg-rose-500/5 transition-all duration-200 cursor-pointer flex items-center justify-center"
-                                    title="Deletar despesa"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </motion.div>
-            </div>
-          )}
-
-          {/* TABELA: FATURAS CARTOES */}
-          {activeView === "cartoes" && (
+            {/* TABELA: FATURAS CARTOES */}
+            {subTabSaidas === "cartoes" && (
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1777,7 +2247,7 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           )}
 
           {/* TABELA: ALUGUÉIS & DÍVIDAS DOS OUTROS COMIGO */}
-          {activeView === "dividas" && (
+          {false && (
             <div className="space-y-6">
               {/* Resumo Stats Topo da Aba de Aluguéis */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1979,7 +2449,7 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           )}
 
           {/* TABELA: PRESTAÇÕES, FINANCIAMENTOS E CARNÊS */}
-          {activeView === "pagamentos" && (
+          {subTabSaidas === "dividas" && (
             <div className="space-y-6">
               {/* Resumo Stats Topo da Aba de Prestações */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -2231,6 +2701,9 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
               </motion.div>
             </div>
           )}
+
+          </div>
+        )}
 
         </div>
       )}

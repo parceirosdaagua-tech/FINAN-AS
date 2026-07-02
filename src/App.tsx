@@ -23,7 +23,7 @@ import {
 import BiometricSimulator from "./components/BiometricSimulator";
 import Dashboard from "./components/Dashboard";
 
-type ActiveTab = "painel" | "entradas" | "saidas" | "cartoes" | "dividas" | "pagamentos";
+type ActiveTab = "painel" | "entradas" | "saidas";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -217,62 +217,32 @@ export default function App() {
             <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-950/90 backdrop-blur-md border-t border-slate-900 px-4 py-2 flex justify-around max-w-md mx-auto sm:max-w-none shadow-[0_-10px_30px_rgba(0,0,0,0.5)] sm:rounded-t-xl">
               <button
                 onClick={() => setActiveTab("painel")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
-                  activeTab === "painel" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
+                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-24 py-1 transition-all duration-200 ${
+                  activeTab === "painel" ? "text-indigo-400 scale-105 font-bold animate-pulse" : "text-slate-500 hover:text-slate-300"
                 }`}
               >
-                <LayoutGrid className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Painel</span>
+                <Wallet className="w-5 h-5" />
+                <span className="text-[10px] uppercase font-mono tracking-wider">Carteira</span>
               </button>
 
               <button
                 onClick={() => setActiveTab("entradas")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
+                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-24 py-1 transition-all duration-200 ${
                   activeTab === "entradas" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
                 }`}
               >
-                <TrendingUp className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Entradas</span>
+                <TrendingUp className="w-5 h-5" />
+                <span className="text-[10px] uppercase font-mono tracking-wider">Entradas</span>
               </button>
 
               <button
                 onClick={() => setActiveTab("saidas")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
+                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-24 py-1 transition-all duration-200 ${
                   activeTab === "saidas" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
                 }`}
               >
-                <TrendingDown className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Saídas</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab("cartoes")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
-                  activeTab === "cartoes" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <CreditCard className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Cartões</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab("dividas")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
-                  activeTab === "dividas" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <HandCoins className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Aluguéis</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab("pagamentos")}
-                className={`flex flex-col items-center justify-center gap-1 cursor-pointer w-20 py-1 transition-all duration-200 ${
-                  activeTab === "pagamentos" ? "text-indigo-400 scale-105 font-bold" : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <Clock className="w-4 h-4" />
-                <span className="text-[9px] uppercase font-mono tracking-wider">Parcelas</span>
+                <TrendingDown className="w-5 h-5" />
+                <span className="text-[10px] uppercase font-mono tracking-wider">Saídas</span>
               </button>
             </div>
           </motion.div>

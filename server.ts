@@ -3,9 +3,26 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import webpush from "web-push";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
+
+dotenv.config();
 
 const PORT = 3000;
 const DB_FILE = path.join(process.cwd(), "db.json");
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+
+const supabase = (supabaseUrl && supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
+
+if (supabase) {
+  console.log("Supabase client initialized with URL:", supabaseUrl);
+} else {
+  console.log("Supabase credentials not found. Operating in local mode.");
+}
 
 // Helper to load/save DB
 interface DBState {
@@ -195,7 +212,7 @@ function processRecurring(data: DBState): boolean {
   return changed;
 }
 
-function loadDB(): DBState {
+function loadDBLocal(): DBState {
   if (!fs.existsSync(DB_FILE)) {
     const initial = getInitialDB();
     fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), "utf-8");
@@ -226,20 +243,81 @@ function loadDB(): DBState {
     
     return data;
   } catch (error) {
-    console.error("Error loading DB, resetting to defaults", error);
+    console.error("Error loading local DB, resetting to defaults", error);
     const initial = getInitialDB();
     fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), "utf-8");
     return initial;
   }
 }
 
+let globalDb: DBState = loadDBLocal();
+
+async function syncFromSupabase(): Promise<DBState> {
+  if (!supabase) {
+    return globalDb;
+  }
+  try {
+    const { data, error } = await supabase
+      .from("vortex_finance")
+      .select("data")
+      .eq("id", "default")
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (data && data.data) {
+      globalDb = data.data;
+      fs.writeFileSync(DB_FILE, JSON.stringify(globalDb, null, 2), "utf-8");
+    } else {
+      // Row doesn't exist, let's create it with the current globalDb state
+      await supabase.from("vortex_finance").upsert({ id: "default", data: globalDb, updated_at: new Date().toISOString() });
+    }
+  } catch (err: any) {
+    console.log("Supabase sync info (normal if vortex_finance table doesn't exist yet):", err.message || err);
+  }
+  return globalDb;
+}
+
+async function syncToSupabase(data: DBState) {
+  if (!supabase) return;
+  try {
+    const { error } = await supabase
+      .from("vortex_finance")
+      .upsert({ id: "default", data, updated_at: new Date().toISOString() });
+    if (error) {
+      throw error;
+    }
+    console.log("Successfully synced state to Supabase.");
+  } catch (err: any) {
+    console.log("Error syncing to Supabase:", err.message || err);
+  }
+}
+
+function loadDB(): DBState {
+  return globalDb;
+}
+
 function saveDB(data: DBState) {
+  globalDb = data;
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+  syncToSupabase(data);
 }
 
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // Sync with Supabase on startup
+  if (supabase) {
+    console.log("Checking and syncing initial state from Supabase on startup...");
+    try {
+      await syncFromSupabase();
+    } catch (e) {
+      console.error("Initial Supabase sync failed, using local database:", e);
+    }
+  }
 
   // Initialize DB and Web Push
   const db = loadDB();
@@ -253,6 +331,32 @@ async function startServer() {
   }
 
   // --- Auth API ---
+  app.get("/api/database-status", async (req, res) => {
+    let tableExists = false;
+    let syncError = null;
+    if (supabase) {
+      try {
+        const { error } = await supabase
+          .from("vortex_finance")
+          .select("id")
+          .limit(1);
+        if (!error) {
+          tableExists = true;
+        } else {
+          syncError = error.message;
+        }
+      } catch (e: any) {
+        syncError = e.message;
+      }
+    }
+    res.json({
+      supabaseConnected: !!supabase,
+      tableExists,
+      syncError,
+      mode: supabase ? (tableExists ? "supabase" : "supabase_missing_table") : "local_file"
+    });
+  });
+
   app.get("/api/auth/session", (req, res) => {
     // Single-user session check. We use a simple token verification on the client
     res.json({ user: { email: "parceirosdaagua@gmail.com", id: "staff-engineer-uuid" } });
@@ -341,7 +445,8 @@ async function startServer() {
   });
 
   // --- Receitas API ---
-  app.get("/api/receitas", (req, res) => {
+  app.get("/api/receitas", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.receitas);
   });
@@ -355,7 +460,8 @@ async function startServer() {
       data: req.body.data || new Date().toISOString().split("T")[0],
       valor: Number(req.body.valor) || 0,
       status_recebimento: req.body.status_recebimento || "pendente",
-      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false
+      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false,
+      categoria: req.body.categoria || "outros"
     };
     data.receitas.push(newRec);
     saveDB(data);
@@ -373,7 +479,8 @@ async function startServer() {
         data: req.body.data !== undefined ? req.body.data : data.receitas[index].data,
         valor: req.body.valor !== undefined ? Number(req.body.valor) : data.receitas[index].valor,
         status_recebimento: req.body.status_recebimento !== undefined ? req.body.status_recebimento : data.receitas[index].status_recebimento,
-        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.receitas[index].recorrente
+        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.receitas[index].recorrente,
+        categoria: req.body.categoria !== undefined ? req.body.categoria : data.receitas[index].categoria
       };
       saveDB(data);
       res.json(data.receitas[index]);
@@ -391,7 +498,8 @@ async function startServer() {
   });
 
   // --- Despesas API ---
-  app.get("/api/despesas", (req, res) => {
+  app.get("/api/despesas", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.despesas);
   });
@@ -405,7 +513,8 @@ async function startServer() {
       data_vencimento: req.body.data_vencimento || new Date().toISOString().split("T")[0],
       status_pagamento: req.body.status_pagamento || "pendente",
       tipo: req.body.tipo || "geral",
-      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false
+      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false,
+      categoria: req.body.categoria || "outros"
     };
     data.despesas.push(newDes);
     saveDB(data);
@@ -423,7 +532,8 @@ async function startServer() {
         data_vencimento: req.body.data_vencimento !== undefined ? req.body.data_vencimento : data.despesas[index].data_vencimento,
         status_pagamento: req.body.status_pagamento !== undefined ? req.body.status_pagamento : data.despesas[index].status_pagamento,
         tipo: req.body.tipo !== undefined ? req.body.tipo : (data.despesas[index].tipo || "geral"),
-        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.despesas[index].recorrente
+        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.despesas[index].recorrente,
+        categoria: req.body.categoria !== undefined ? req.body.categoria : data.despesas[index].categoria
       };
       saveDB(data);
       res.json(data.despesas[index]);
@@ -441,7 +551,8 @@ async function startServer() {
   });
 
   // --- Faturas API ---
-  app.get("/api/faturas", (req, res) => {
+  app.get("/api/faturas", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.faturas);
   });
@@ -501,7 +612,8 @@ async function startServer() {
   });
 
   // --- Pagamentos Diários API ---
-  app.get("/api/pagamentos-diarios", (req, res) => {
+  app.get("/api/pagamentos-diarios", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.pagamentos_diarios);
   });
@@ -511,6 +623,7 @@ async function startServer() {
     const newPag = {
       id: "pag-" + Date.now(),
       descricao: req.body.descricao || "Novo Pagamento Diário",
+      veiculo: req.body.veiculo || "",
       parcela_atual: Number(req.body.parcela_atual) || 0,
       parcela_total: Number(req.body.parcela_total) || 12,
       valor_pago: Number(req.body.valor_pago) || 0,
@@ -533,6 +646,7 @@ async function startServer() {
       data.pagamentos_diarios[index] = {
         ...data.pagamentos_diarios[index],
         descricao: req.body.descricao !== undefined ? req.body.descricao : data.pagamentos_diarios[index].descricao,
+        veiculo: req.body.veiculo !== undefined ? req.body.veiculo : data.pagamentos_diarios[index].veiculo,
         parcela_atual: req.body.parcela_atual !== undefined ? Number(req.body.parcela_atual) : data.pagamentos_diarios[index].parcela_atual,
         parcela_total: req.body.parcela_total !== undefined ? Number(req.body.parcela_total) : data.pagamentos_diarios[index].parcela_total,
         valor_pago: req.body.valor_pago !== undefined ? Number(req.body.valor_pago) : data.pagamentos_diarios[index].valor_pago,
@@ -559,7 +673,8 @@ async function startServer() {
   });
 
   // --- Dívidas dos Outros API ---
-  app.get("/api/dividas-outros", (req, res) => {
+  app.get("/api/dividas-outros", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.dividas_outros);
   });
@@ -575,7 +690,11 @@ async function startServer() {
       saldo_devedor: (Number(req.body.valor_total) || 0) - (Number(req.body.valor_pago) || 0),
       data_vencimento: req.body.data_vencimento || new Date().toISOString().split("T")[0],
       status: req.body.status || "pendente",
-      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false
+      recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : false,
+      parcela_atual: req.body.parcela_atual !== undefined ? Number(req.body.parcela_atual) : 0,
+      parcela_total: req.body.parcela_total !== undefined ? Number(req.body.parcela_total) : 12,
+      valor_parcela: req.body.valor_parcela !== undefined ? Number(req.body.valor_parcela) : 0,
+      valor_pago_mes: req.body.valor_pago_mes !== undefined ? Number(req.body.valor_pago_mes) : 0
     };
     data.dividas_outros.push(newDiv);
     saveDB(data);
@@ -599,7 +718,11 @@ async function startServer() {
         saldo_devedor,
         data_vencimento: req.body.data_vencimento !== undefined ? req.body.data_vencimento : data.dividas_outros[index].data_vencimento,
         status: req.body.status !== undefined ? req.body.status : data.dividas_outros[index].status,
-        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.dividas_outros[index].recorrente
+        recorrente: req.body.recorrente !== undefined ? Boolean(req.body.recorrente) : data.dividas_outros[index].recorrente,
+        parcela_atual: req.body.parcela_atual !== undefined ? Number(req.body.parcela_atual) : data.dividas_outros[index].parcela_atual,
+        parcela_total: req.body.parcela_total !== undefined ? Number(req.body.parcela_total) : data.dividas_outros[index].parcela_total,
+        valor_parcela: req.body.valor_parcela !== undefined ? Number(req.body.valor_parcela) : data.dividas_outros[index].valor_parcela,
+        valor_pago_mes: req.body.valor_pago_mes !== undefined ? Number(req.body.valor_pago_mes) : data.dividas_outros[index].valor_pago_mes
       };
       saveDB(data);
       res.json(data.dividas_outros[index]);
@@ -617,7 +740,8 @@ async function startServer() {
   });
 
   // --- Prestações API ---
-  app.get("/api/prestacoes", (req, res) => {
+  app.get("/api/prestacoes", async (req, res) => {
+    await syncFromSupabase();
     const data = loadDB();
     res.json(data.prestacoes || []);
   });

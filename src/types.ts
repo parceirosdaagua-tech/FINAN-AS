@@ -6,6 +6,7 @@ export interface Receita {
   valor: number;
   status_recebimento: 'pendente' | 'recebido';
   recorrente?: boolean;
+  categoria?: string | null;
 }
 
 export interface Despesa {
@@ -16,6 +17,7 @@ export interface Despesa {
   status_pagamento: 'pendente' | 'pago';
   tipo?: 'geral' | 'adicional';
   recorrente?: boolean;
+  categoria?: string | null;
 }
 
 export interface FaturaCartao {
@@ -34,6 +36,7 @@ export interface FaturaCartao {
 export interface PagamentoDiario {
   id: string;
   descricao: string;
+  veiculo?: string | null;
   parcela_atual: number;
   parcela_total: number;
   valor_pago: number;
@@ -55,6 +58,10 @@ export interface DividaOutros {
   data_vencimento: string; // YYYY-MM-DD
   status: 'pendente' | 'pago' | 'atrasado';
   recorrente?: boolean;
+  parcela_atual?: number;
+  parcela_total?: number;
+  valor_parcela?: number;
+  valor_pago_mes?: number;
 }
 
 export interface Prestacao {
