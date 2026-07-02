@@ -80,6 +80,10 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
   const [showDbGuide, setShowDbGuide] = useState(false);
   const [sqlCopied, setSqlCopied] = useState(false);
 
+  // Client-side backup states for mobile resilience
+  const [detectedBackup, setDetectedBackup] = useState<any | null>(null);
+  const [restoringBackup, setRestoringBackup] = useState(false);
+
   // Fetch initial data
   const fetchData = async () => {
     setLoading(true);
@@ -116,9 +120,50 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
       }
       
       setError(null);
+
+      // Check if server database is empty and if we have a richer local backup on this mobile device/browser
+      const isServerEmpty = recData.length === 0 && desData.length === 0 && fatData.length === 0 &&
+                            pagData.length === 0 && divData.length === 0 && presData.length === 0;
+
+      if (isServerEmpty) {
+        const localBackupRaw = localStorage.getItem("vortex_finance_local_backup_v2");
+        if (localBackupRaw) {
+          try {
+            const backup = JSON.parse(localBackupRaw);
+            const backupHasData = (backup.receitas?.length || 0) > 0 || (backup.despesas?.length || 0) > 0 || 
+                                  (backup.faturas?.length || 0) > 0 || (backup.pagamentosDiarios?.length || 0) > 0 || 
+                                  (backup.dividasOutros?.length || 0) > 0 || (backup.prestacoes?.length || 0) > 0;
+            if (backupHasData) {
+              setDetectedBackup(backup);
+            }
+          } catch (e) {
+            console.error("Erro ao ler backup do localStorage:", e);
+          }
+        }
+      }
     } catch (err) {
-      console.error("Erro ao carregar dados do banco:", err);
-      setError("Não foi possível carregar as informações do servidor.");
+      console.error("Erro ao carregar dados do banco, tentando backup local do celular:", err);
+      
+      // Fallback: If connection fails, load from local backup so the user can still use the app on mobile
+      const localBackupRaw = localStorage.getItem("vortex_finance_local_backup_v2");
+      if (localBackupRaw) {
+        try {
+          const backup = JSON.parse(localBackupRaw);
+          setReceitas(backup.receitas || []);
+          setDespesas(backup.despesas || []);
+          setOriginalDespesas(JSON.parse(JSON.stringify(backup.despesas || [])));
+          setFaturas(backup.faturas || []);
+          setPagamentosDiarios(backup.pagamentosDiarios || []);
+          setDividasOutros(backup.dividasOutros || []);
+          setPrestacoes(backup.prestacoes || []);
+          setOriginalPrestacoes(JSON.parse(JSON.stringify(backup.prestacoes || [])));
+          setError("Conexão instável. Exibindo dados locais do celular de forma offline.");
+        } catch (e) {
+          setError("Não foi possível conectar ao servidor.");
+        }
+      } else {
+        setError("Não foi possível conectar ao servidor.");
+      }
     } finally {
       setLoading(false);
     }
@@ -127,6 +172,74 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
   useEffect(() => {
     fetchData();
   }, []);
+
+  // Save state to local browser/mobile storage whenever data is modified
+  useEffect(() => {
+    if (!loading && !error) {
+      const hasData = receitas.length > 0 || despesas.length > 0 || faturas.length > 0 || 
+                      pagamentosDiarios.length > 0 || dividasOutros.length > 0 || prestacoes.length > 0;
+      
+      if (hasData) {
+        const backup = {
+          receitas,
+          despesas,
+          faturas,
+          pagamentosDiarios,
+          dividasOutros,
+          prestacoes,
+          timestamp: Date.now()
+        };
+        localStorage.setItem("vortex_finance_local_backup_v2", JSON.stringify(backup));
+      }
+    }
+  }, [receitas, despesas, faturas, pagamentosDiarios, dividasOutros, prestacoes, loading, error]);
+
+  const handleRestoreBackup = async () => {
+    if (!detectedBackup) return;
+    setRestoringBackup(true);
+    try {
+      const res = await fetch("/api/restore-backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          receitas: detectedBackup.receitas || [],
+          despesas: detectedBackup.despesas || [],
+          faturas: detectedBackup.faturas || [],
+          pagamentosDiarios: detectedBackup.pagamentosDiarios || [],
+          dividasOutros: detectedBackup.dividasOutros || [],
+          prestacoes: detectedBackup.prestacoes || []
+        })
+      });
+
+      if (res.ok) {
+        setReceitas(detectedBackup.receitas || []);
+        setDespesas(detectedBackup.despesas || []);
+        setOriginalDespesas(JSON.parse(JSON.stringify(detectedBackup.despesas || [])));
+        setFaturas(detectedBackup.faturas || []);
+        setPagamentosDiarios(detectedBackup.pagamentosDiarios || []);
+        setDividasOutros(detectedBackup.dividasOutros || []);
+        setPrestacoes(detectedBackup.prestacoes || []);
+        setOriginalPrestacoes(JSON.parse(JSON.stringify(detectedBackup.prestacoes || [])));
+        
+        setDetectedBackup(null);
+        alert("Sincronização concluída com sucesso! Seus dados do celular foram salvos de volta no servidor.");
+      } else {
+        alert("Falha ao salvar dados de backup no servidor.");
+      }
+    } catch (err) {
+      console.error("Erro ao sincronizar backup:", err);
+      alert("Erro de conexão ao salvar os dados no servidor.");
+    } finally {
+      setRestoringBackup(false);
+    }
+  };
+
+  const handleDiscardBackup = () => {
+    if (confirm("Tem certeza que deseja descartar estes dados salvos no seu celular?")) {
+      localStorage.removeItem("vortex_finance_local_backup_v2");
+      setDetectedBackup(null);
+    }
+  };
 
   // --- Inline Grid Saving Helpers ---
   const saveReceita = async (id: string, updatedFields: Partial<Receita>) => {
@@ -951,6 +1064,50 @@ export default function Dashboard({ activeView = "painel" }: DashboardProps) {
           Sincronizar
         </button>
       </div>
+
+      {/* Aviso de Backup Detectado no Celular */}
+      {detectedBackup && (
+        <div className="bg-gradient-to-r from-cyan-950/30 to-indigo-950/30 border border-cyan-500/30 rounded-xl p-4 text-cyan-200">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <RefreshCw className="w-5 h-5 mt-0.5 text-cyan-400 flex-shrink-0 animate-pulse" />
+              <div>
+                <h3 className="font-mono font-bold text-xs uppercase tracking-wider text-cyan-300">
+                  ⚡ RECUPERAÇÃO DE DADOS DETECTADA NO CELULAR
+                </h3>
+                <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                  Encontramos dados salvos localmente na memória deste aparelho (
+                  <span className="text-cyan-400 font-bold">{detectedBackup.receitas?.length || 0} receitas</span>,{" "}
+                  <span className="text-violet-400 font-bold">{detectedBackup.despesas?.length || 0} contas</span>,{" "}
+                  <span className="text-pink-400 font-bold">{detectedBackup.faturas?.length || 0} faturas</span>,{" "}
+                  <span className="text-emerald-400 font-bold">{detectedBackup.pagamentosDiarios?.length || 0} pagamentos diários</span>
+                  ). Deseja restaurar e salvar esses dados no servidor agora para que fiquem guardados permanentemente?
+                </p>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Isso protege seus registros financeiros se o servidor hibernar por inatividade.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 self-start md:self-center">
+              <button
+                onClick={handleRestoreBackup}
+                disabled={restoringBackup}
+                className="bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-[10px] uppercase font-bold px-3.5 py-2 rounded shadow-lg shadow-cyan-500/10 cursor-pointer flex items-center gap-1.5 transition-all active:scale-95 disabled:bg-slate-800 disabled:text-slate-600"
+              >
+                <Check className="w-3.5 h-3.5" />
+                {restoringBackup ? "Sincronizando..." : "Sim, Sincronizar Tudo"}
+              </button>
+              <button
+                onClick={handleDiscardBackup}
+                disabled={restoringBackup}
+                className="bg-transparent hover:bg-slate-900/50 text-slate-400 hover:text-slate-300 font-mono text-[10px] uppercase font-bold px-3 py-2 rounded cursor-pointer transition-all active:scale-95"
+              >
+                Descartar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Indicador de Status do Banco de Dados */}
       {dbStatus && (

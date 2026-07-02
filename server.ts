@@ -11,7 +11,7 @@ dotenv.config();
 const PORT = 3000;
 const DB_FILE = path.join(process.cwd(), "db.json");
 
-const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseUrl = process.env.SUPABASE_URL || process.env.URL_SUPABASE || "";
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 
 const supabase = (supabaseUrl && supabaseAnonKey)
@@ -355,6 +355,21 @@ async function startServer() {
       syncError,
       mode: supabase ? (tableExists ? "supabase" : "supabase_missing_table") : "local_file"
     });
+  });
+
+  app.post("/api/restore-backup", (req, res) => {
+    const { receitas, despesas, faturas, pagamentosDiarios, dividasOutros, prestacoes } = req.body;
+    const current = loadDB();
+    
+    if (Array.isArray(receitas)) current.receitas = receitas;
+    if (Array.isArray(despesas)) current.despesas = despesas;
+    if (Array.isArray(faturas)) current.faturas = faturas;
+    if (Array.isArray(pagamentosDiarios)) current.pagamentos_diarios = pagamentosDiarios;
+    if (Array.isArray(dividasOutros)) current.dividas_outros = dividasOutros;
+    if (Array.isArray(prestacoes)) current.prestacoes = prestacoes;
+
+    saveDB(current);
+    res.json({ success: true, message: "Backup do celular sincronizado com sucesso no servidor!" });
   });
 
   app.get("/api/auth/session", (req, res) => {
